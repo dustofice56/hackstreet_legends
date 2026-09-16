@@ -1,0 +1,1074 @@
+import http.server
+import json
+import os
+
+PORT = 8000
+
+# --- Configuration ---
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
+
+supabase_client = None
+try:
+    if SUPABASE_URL and SUPABASE_KEY and "YOUR_" not in SUPABASE_URL:
+        from supabase import create_client
+        supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+except Exception as e:
+    print(f"[Notice] Supabase client initialization skipped: {e}")
+
+# Initialize official Groq client if API key is present
+groq_client = None
+try:
+    if GROQ_API_KEY and "YOUR_" not in GROQ_API_KEY:
+        from groq import Groq
+        groq_client = Groq(api_key=GROQ_API_KEY)
+except Exception as e:
+    print(f"[Notice] Groq client initialization skipped: {e}")
+
+# --- Frontend UI HTML ---
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TransitCore - Campus Mobility Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; }
+        @keyframes pulse-slow {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.6; transform: scale(1.05); }
+        }
+        .animate-pulse-slow { animation: pulse-slow 3s infinite ease-in-out; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-0 m-0">
+
+    <!-- AUTHENTICATION CONTAINER -->
+    <div id="auth-container" class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl space-y-6">
+        <div class="text-center space-y-2">
+            <div class="w-12 h-12 rounded-xl bg-indigo-600 mx-auto flex items-center justify-center shadow-lg shadow-indigo-600/30">
+                <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            </div>
+            <h1 class="text-xl font-bold text-white tracking-tight">TransitCore Portal</h1>
+            <p class="text-xs text-slate-400">Campus Mobility Intelligence Engine</p>
+        </div>
+
+        <div id="config-warning" class="hidden text-[11px] p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400">
+            ⚠️ <strong>Local Mode Active:</strong> Supabase keys are not set. Submitting will simulate a login for testing.
+        </div>
+
+        <div class="flex rounded-xl bg-slate-950 p-1 border border-slate-800">
+            <button onclick="switchAuthTab('login')" id="tab-login" class="flex-1 py-2 text-xs font-semibold rounded-lg transition-all bg-indigo-600 text-white shadow">Sign In</button>
+            <button onclick="switchAuthTab('register')" id="tab-register" class="flex-1 py-2 text-xs font-semibold rounded-lg transition-all text-slate-400 hover:text-white">Register</button>
+        </div>
+
+        <div id="auth-message" class="hidden text-xs p-3 rounded-xl border"></div>
+
+        <form id="login-form" onsubmit="handleLogin(event)" class="space-y-4">
+            <div>
+                <label class="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Campus Email</label>
+                <input type="email" id="login-email" required class="w-full p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="student@vit.ac.in">
+            </div>
+            <div>
+                <label class="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Password</label>
+                <input type="password" id="login-password" required class="w-full p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="••••••••">
+            </div>
+            <button type="submit" class="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl transition-all shadow-lg shadow-indigo-600/20">Secure Sign In</button>
+        </form>
+
+        <form id="register-form" onsubmit="handleRegister(event)" class="space-y-4 hidden">
+            <div>
+                <label class="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Campus Email</label>
+                <input type="email" id="reg-email" required class="w-full p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="student@vit.ac.in">
+            </div>
+            <div>
+                <label class="block text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-1">Password</label>
+                <input type="password" id="reg-password" required class="w-full p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="••••••••">
+            </div>
+            <button type="submit" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl transition-all shadow-lg shadow-emerald-600/20">Create Account</button>
+        </form>
+    </div>
+
+    <!-- MAIN DASHBOARD CONTAINER -->
+    <div id="dashboard-container" class="w-full h-screen hidden flex bg-slate-950 overflow-hidden">
+        
+        <!-- SIDEBAR MENU COLUMN -->
+        <aside class="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between p-4 select-none">
+            <div class="space-y-6">
+                <div class="flex items-center gap-3 px-2 py-1">
+                    <div class="w-9 h-9 rounded-xl bg-indigo-600 flex items-center justify-center shadow-md shadow-indigo-600/30">
+                        <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    </div>
+                    <div>
+                        <h2 class="text-sm font-bold text-white tracking-tight">TransitCore</h2>
+                        <span class="text-[10px] text-emerald-400 font-medium">● System Online</span>
+                    </div>
+                </div>
+
+                <nav class="space-y-1">
+                    <button onclick="switchTab('home')" id="nav-home" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/20">🏠 Home</button>
+                    <button onclick="switchTab('timings')" id="nav-timings" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all">⏱️ Timings</button>
+                    <button onclick="switchTab('map')" id="nav-map" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all">🗺️ Map</button>
+                    <button onclick="switchTab('events')" id="nav-events" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all">🎉 Events</button>
+                    <button onclick="switchTab('forecast')" id="nav-forecast" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all">📅 Week Forecast</button>
+                    <button onclick="switchTab('payment')" id="nav-payment" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all">💳 Payment</button>
+                    <button onclick="switchTab('due')" id="nav-due" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all">⚠️ Due</button>
+                    <button onclick="switchTab('ai')" id="nav-ai" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all">🤖 AI Assistance</button>
+                </nav>
+            </div>
+
+            <div class="pt-4 border-t border-slate-800 space-y-3">
+                <div class="px-2">
+                    <p id="user-display" class="text-[11px] text-slate-400 truncate font-medium"></p>
+                </div>
+                <button onclick="handleLogout()" class="w-full py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 text-xs font-semibold rounded-xl transition-all text-center">
+                    Sign Out
+                </button>
+            </div>
+        </aside>
+
+        <!-- CONTENT AREA -->
+        <main class="flex-1 bg-slate-950 overflow-y-auto p-8">
+            
+            <!-- TAB 1: HOME -->
+            <div id="tab-content-home" class="space-y-6 max-w-5xl mx-auto">
+                <div class="flex justify-between items-center bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl">
+                    <div>
+                        <h2 class="text-lg font-bold text-white">Shuttles Available</h2>
+                        <p class="text-xs text-slate-400 mt-0.5">Click any shuttle below to inspect route checkpoints, available seats, and trip cost.</p>
+                    </div>
+                    <button onclick="loadShuttles()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl transition-all shadow">Refresh Shuttles</button>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="md:col-span-1 space-y-3">
+                        <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 px-1">Active Fleet</h3>
+                        <div id="shuttle-list" class="space-y-2"></div>
+                    </div>
+
+                    <div class="md:col-span-2 space-y-6">
+                        <!-- Shuttle Detail Card -->
+                        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-6">
+                            <div id="shuttle-detail-placeholder" class="text-center py-16 text-slate-500 text-xs">
+                                👈 Select a shuttle from the left list to view its route and seat availability.
+                            </div>
+                            <div id="shuttle-detail-card" class="hidden space-y-6">
+                                <div class="flex justify-between items-start border-b border-slate-800 pb-4">
+                                    <div>
+                                        <span id="detail-number" class="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 px-2 py-0.5 rounded font-mono font-bold">SH-01</span>
+                                        <h3 id="detail-name" class="text-base font-bold text-white mt-1">Shuttle Express Alpha</h3>
+                                    </div>
+                                    <span id="detail-status" class="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-semibold rounded-lg">On Schedule</span>
+                                </div>
+
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                                        <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">From Location</span>
+                                        <p id="detail-from" class="text-xs font-semibold text-slate-200 mt-1">Hostel Block 18</p>
+                                    </div>
+                                    <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                                        <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">To Location</span>
+                                        <p id="detail-to" class="text-xs font-semibold text-slate-200 mt-1">Tech Tower (TT)</p>
+                                    </div>
+                                </div>
+
+                                <div class="flex items-center justify-between bg-slate-950 p-4 rounded-xl border border-slate-800">
+                                    <div>
+                                        <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Seats Available</span>
+                                        <p id="detail-seats" class="text-sm font-bold text-emerald-400 mt-0.5">14 Seats</p>
+                                    </div>
+                                    <div>
+                                        <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Cost / Fare</span>
+                                        <p id="detail-cost" class="text-sm font-bold text-indigo-400 mt-0.5">₹10.00</p>
+                                    </div>
+                                    <button onclick="bookShuttleSeat()" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs rounded-xl shadow-lg shadow-emerald-600/20 transition-all">
+                                        Choose Shuttle
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Recent Bookings & Due Integration Section -->
+                        <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <h3 class="text-sm font-bold text-white">Recent Bus Trips & Outstanding Fares</h3>
+                                    <p class="text-[11px] text-slate-400">Timings of taken buses along with unpaid fares linked to your account dues.</p>
+                                </div>
+                                <span id="trip-count-badge" class="px-2.5 py-1 bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 text-[10px] font-mono font-bold rounded-lg">0 Trips Logged</span>
+                            </div>
+
+                            <div class="border border-slate-800 rounded-xl overflow-hidden bg-slate-950">
+                                <table class="w-full text-left text-xs">
+                                    <thead class="bg-slate-900 text-slate-400 border-b border-slate-800">
+                                        <tr>
+                                            <th class="p-3">Shuttle ID</th>
+                                            <th class="p-3">Route</th>
+                                            <th class="p-3">Timestamp Taken</th>
+                                            <th class="p-3">Fare Amount</th>
+                                            <th class="p-3 text-right">Payment Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="trip-history-tbody" class="divide-y divide-slate-800 text-slate-300">
+                                        <tr>
+                                            <td colspan="5" class="p-6 text-center text-slate-500 italic">No shuttle trips taken yet. Select and choose a shuttle above to log a trip.</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 2: TIMINGS -->
+            <div id="tab-content-timings" class="space-y-6 max-w-4xl mx-auto hidden">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+                    <h2 class="text-base font-bold text-white">Shuttle Timings & Schedule</h2>
+                    <div class="border border-slate-800 rounded-xl overflow-hidden">
+                        <table class="w-full text-left text-xs">
+                            <thead class="bg-slate-950 text-slate-400 border-b border-slate-800">
+                                <tr>
+                                    <th class="p-3">Route Name</th>
+                                    <th class="p-3">Frequency</th>
+                                    <th class="p-3">First Trip</th>
+                                    <th class="p-3">Last Trip</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-slate-800 text-slate-300">
+                                <tr><td class="p-3 font-medium">Hostel ➔ Tech Tower</td><td class="p-3">Every 10 mins</td><td class="p-3">07:30 AM</td><td class="p-3">09:30 PM</td></tr>
+                                <tr><td class="p-3 font-medium">Main Gate ➔ SJT</td><td class="p-3">Every 15 mins</td><td class="p-3">08:00 AM</td><td class="p-3">09:00 PM</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 3: MAP (CAMPUS INTERACTIVE CANVAS) -->
+            <div id="tab-content-map" class="space-y-6 max-w-4xl mx-auto hidden">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-5">
+                    
+                    <!-- Top Bar with Dropdown and Live Badge -->
+                    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-950 p-4 rounded-xl border border-slate-800">
+                        <div class="space-y-1">
+                            <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Select Active Shuttle Route</span>
+                            <select id="map-shuttle-select" onchange="changeMapShuttle(this.value)" class="bg-slate-900 border border-slate-700 text-xs text-white rounded-lg px-3 py-2 font-medium focus:outline-none focus:border-indigo-500">
+                                <!-- Populated dynamically -->
+                            </select>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span id="map-status-badge" class="px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-bold rounded-lg">
+                                🟢 Live Tracking Active
+                            </span>
+                            <span id="map-eta" class="text-xs text-slate-300 font-mono font-bold bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800">ETA: 2 mins</span>
+                        </div>
+                    </div>
+
+                    <!-- Campus Canvas Map Container -->
+                    <div class="relative w-full h-[450px] bg-slate-950 border border-slate-800 rounded-xl overflow-hidden shadow-inner flex items-center justify-center">
+                        <canvas id="campusMapCanvas" width="800" height="450" class="w-full h-full object-cover"></canvas>
+                        
+                        <!-- Map Legend Overlay -->
+                        <div class="absolute bottom-3 left-3 bg-slate-950/80 backdrop-blur border border-slate-800 px-3 py-2 rounded-lg flex items-center gap-4 text-[10px] text-slate-300">
+                            <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-indigo-500 inline-block"></span><span>Shuttle</span></div>
+                            <div class="flex items-center gap-1.5"><span class="w-3 h-1 bg-slate-600 inline-block"></span><span>Static Road</span></div>
+                            <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span><span>Checkpoint Marker</span></div>
+                        </div>
+                    </div>
+
+                    <div class="flex items-center justify-between text-[11px] text-slate-400 px-1">
+                        <span>📍 Inside Campus Live Navigation: Static Roads & Moving Shuttles</span>
+                        <span class="text-indigo-400 font-medium">GPS Signal: Strong (5G)</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 4: EVENTS -->
+            <div id="tab-content-events" class="space-y-6 max-w-4xl mx-auto hidden">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+                    <h2 class="text-base font-bold text-white">Campus Calendar & Transit Events Matrix</h2>
+                    <p class="text-xs text-slate-400">Inspect campus schedule boxes for holidays, exams, festivals, and transit changes.</p>
+                    
+                    <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 pt-2">
+                        <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl flex flex-col justify-between space-y-3">
+                            <div class="flex justify-between items-start">
+                                <span class="text-[10px] font-bold tracking-wider text-slate-500 uppercase">General</span>
+                                <span class="px-2 py-0.5 bg-slate-800 text-slate-300 text-[10px] font-mono rounded">Nil Impact</span>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Weekend / Holiday</h4>
+                                <p class="text-[11px] text-slate-400 mt-1">Standard holiday schedule with reduced morning loops.</p>
+                            </div>
+                            <div class="text-[10px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20 text-center">Status: Nil</div>
+                        </div>
+
+                        <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl flex flex-col justify-between space-y-3">
+                            <div class="flex justify-between items-start">
+                                <span class="text-[10px] font-bold tracking-wider text-amber-500 uppercase">Examination</span>
+                                <span class="px-2 py-0.5 bg-amber-500/10 text-amber-400 text-[10px] font-mono rounded border border-amber-500/20">CAT-1</span>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Continuous Assessment 1</h4>
+                                <p class="text-[11px] text-slate-400 mt-1">Extra shuttles towards TT and MB during morning exam slots.</p>
+                            </div>
+                            <div class="text-[10px] font-mono text-amber-400 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/20 text-center">Active Exam Schedule</div>
+                        </div>
+
+                        <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl flex flex-col justify-between space-y-3">
+                            <div class="flex justify-between items-start">
+                                <span class="text-[10px] font-bold tracking-wider text-amber-500 uppercase">Examination</span>
+                                <span class="px-2 py-0.5 bg-amber-500/10 text-amber-400 text-[10px] font-mono rounded border border-amber-500/20">CAT-2</span>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Continuous Assessment 2</h4>
+                                <p class="text-[11px] text-slate-400 mt-1">Mid-semester testing phase with staggered departure timings.</p>
+                            </div>
+                            <div class="text-[10px] font-mono text-amber-400 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/20 text-center">Active Exam Schedule</div>
+                        </div>
+
+                        <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl flex flex-col justify-between space-y-3">
+                            <div class="flex justify-between items-start">
+                                <span class="text-[10px] font-bold tracking-wider text-rose-500 uppercase">Examination</span>
+                                <span class="px-2 py-0.5 bg-rose-500/10 text-rose-400 text-[10px] font-mono rounded border border-rose-500/20">FAT</span>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Final Assessment Test</h4>
+                                <p class="text-[11px] text-slate-400 mt-1">Full campus quiet hours and intensive exam transit fleet.</p>
+                            </div>
+                            <div class="text-[10px] font-mono text-rose-400 bg-rose-500/10 px-2 py-1 rounded border border-rose-500/20 text-center">Major Examination</div>
+                        </div>
+
+                        <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl flex flex-col justify-between space-y-3">
+                            <div class="flex justify-between items-start">
+                                <span class="text-[10px] font-bold tracking-wider text-indigo-500 uppercase">Flagship Fest</span>
+                                <span class="px-2 py-0.5 bg-indigo-500/10 text-indigo-400 text-[10px] font-mono rounded border border-indigo-500/20">Gravitas</span>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Gravitas Tech Fest</h4>
+                                <p class="text-[11px] text-slate-400 mt-1">Heavy crowds, special event loops, and late-night venue shuttles.</p>
+                            </div>
+                            <div class="text-[10px] font-mono text-indigo-400 bg-indigo-500/10 px-2 py-1 rounded border border-indigo-500/20 text-center">Special Event</div>
+                        </div>
+
+                        <div class="bg-slate-950 border border-slate-800 p-5 rounded-xl flex flex-col justify-between space-y-3">
+                            <div class="flex justify-between items-start">
+                                <span class="text-[10px] font-bold tracking-wider text-slate-500 uppercase">Unconfirmed</span>
+                                <span class="px-2 py-0.5 bg-slate-800 text-slate-400 text-[10px] font-mono rounded">Pending</span>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Cultural Night / Flash Mob</h4>
+                                <p class="text-[11px] text-slate-400 mt-1">Schedule pending management clearance and approvals.</p>
+                            </div>
+                            <div class="text-[10px] font-mono text-slate-400 bg-slate-800 px-2 py-1 rounded text-center">Status: Tentative</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 5: FORECAST (7-DAY WEATHER) -->
+            <div id="tab-content-forecast" class="space-y-6 max-w-4xl mx-auto hidden">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+                    <h2 class="text-base font-bold text-white">7-Day Transit Weather Forecast</h2>
+                    <p class="text-xs text-slate-400 mt-0.5">Plan your campus transit according to the week's weather conditions.</p>
+                    
+                    <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-7 gap-3">
+                        <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center flex flex-col items-center justify-center transition-all hover:bg-slate-800/50">
+                            <span class="text-[10px] font-bold tracking-widest text-slate-500 mb-2">MON</span>
+                            <span class="text-2xl mb-2">☀️</span>
+                            <strong class="text-[11px] text-emerald-400">Clear</strong>
+                        </div>
+                        <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center flex flex-col items-center justify-center transition-all hover:bg-slate-800/50">
+                            <span class="text-[10px] font-bold tracking-widest text-slate-500 mb-2">TUE</span>
+                            <span class="text-2xl mb-2">☁️</span>
+                            <strong class="text-[11px] text-slate-400">Cloudy</strong>
+                        </div>
+                        <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center flex flex-col items-center justify-center transition-all hover:bg-slate-800/50">
+                            <span class="text-[10px] font-bold tracking-widest text-slate-500 mb-2">WED</span>
+                            <span class="text-2xl mb-2">🌧️</span>
+                            <strong class="text-[11px] text-sky-400">Rainy</strong>
+                        </div>
+                        <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center flex flex-col items-center justify-center transition-all hover:bg-slate-800/50">
+                            <span class="text-[10px] font-bold tracking-widest text-slate-500 mb-2">THU</span>
+                            <span class="text-2xl mb-2">⛈️</span>
+                            <strong class="text-[11px] text-amber-400">Storms</strong>
+                        </div>
+                        <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center flex flex-col items-center justify-center transition-all hover:bg-slate-800/50">
+                            <span class="text-[10px] font-bold tracking-widest text-slate-500 mb-2">FRI</span>
+                            <span class="text-2xl mb-2">⛅</span>
+                            <strong class="text-[11px] text-slate-300">Partly</strong>
+                        </div>
+                        <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center flex flex-col items-center justify-center transition-all hover:bg-slate-800/50">
+                            <span class="text-[10px] font-bold tracking-widest text-slate-500 mb-2">SAT</span>
+                            <span class="text-2xl mb-2">☀️</span>
+                            <strong class="text-[11px] text-emerald-400">Sunny</strong>
+                        </div>
+                        <div class="bg-slate-950 p-4 rounded-xl border border-slate-800 text-center flex flex-col items-center justify-center transition-all hover:bg-slate-800/50">
+                            <span class="text-[10px] font-bold tracking-widest text-slate-500 mb-2">SUN</span>
+                            <span class="text-2xl mb-2">🌧️</span>
+                            <strong class="text-[11px] text-sky-400">Showers</strong>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 6: PAYMENT -->
+            <div id="tab-content-payment" class="space-y-6 max-w-4xl mx-auto hidden">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+                    <h2 class="text-base font-bold text-white">Pass & Wallet Payment Gateway</h2>
+                    
+                    <!-- Balance Display & Warning -->
+                    <div class="p-5 bg-slate-950 border border-slate-800 rounded-xl space-y-3">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <span class="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">Wallet Balance</span>
+                                <h3 id="payment-wallet-balance" class="text-xl font-bold text-white mt-0.5">₹25.00</h3>
+                            </div>
+                            <div class="relative">
+                                <button onclick="toggleTopUpDropdown()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-xl shadow transition-all">Top Up Wallet ▾</button>
+                                
+                                <!-- Top Up Dropdown Menu -->
+                                <div id="topup-dropdown" class="hidden absolute right-0 mt-2 w-56 bg-slate-900 border border-slate-700 rounded-xl p-3 shadow-2xl z-20 space-y-3">
+                                    <label class="block text-[11px] font-semibold text-slate-300">Select Amount to Add:</label>
+                                    <select id="topup-select-amount" class="w-full bg-slate-950 border border-slate-800 text-xs text-white rounded-lg p-2 font-mono focus:outline-none focus:border-indigo-500">
+                                        <option value="20">₹20.00</option>
+                                        <option value="50" selected>₹50.00</option>
+                                        <option value="100">₹100.00</option>
+                                        <option value="200">₹200.00</option>
+                                        <option value="500">₹500.00</option>
+                                    </select>
+                                    <button onclick="confirmTopUp()" class="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg shadow transition-all">Confirm & Add</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Dynamic Low Balance Message -->
+                        <div id="payment-low-balance-alert" class="hidden p-3 bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs rounded-lg font-medium flex items-center gap-2">
+                            <span>⚠️</span> <span>Balance insufficient (below ₹30). Please top up your wallet.</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 7: DUE -->
+            <div id="tab-content-due" class="space-y-6 max-w-4xl mx-auto hidden">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl space-y-4">
+                    <div class="flex justify-between items-center">
+                        <h2 class="text-base font-bold text-white">Account Dues & Unpaid Fare Fines</h2>
+                        <span id="due-total-badge" class="px-3 py-1 bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs font-bold rounded-lg">Total Due: ₹0.00</span>
+                    </div>
+
+                    <!-- Low Balance Warning Banner in Due Section -->
+                    <div id="due-low-balance-alert" class="hidden p-3 bg-amber-500/10 border border-amber-500/20 text-amber-400 text-xs rounded-xl font-medium flex items-center gap-2">
+                        <span>⚠️</span> <span>Balance insufficient (below ₹30). Top up your wallet to ensure uninterrupted due clearances.</span>
+                    </div>
+
+                    <div id="due-container" class="space-y-3">
+                        <div class="p-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-xl font-medium">
+                            ✨ No pending dues or unpaid fares registered on your student account.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB 8: AI ASSISTANCE -->
+            <div id="tab-content-ai" class="space-y-6 max-w-4xl mx-auto hidden">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl flex flex-col h-[600px]">
+                    <div class="border-b border-slate-800 pb-4 mb-4 flex justify-between items-center">
+                        <div>
+                            <h2 class="text-base font-bold text-white flex items-center gap-2">
+                                <span>🤖</span> TransitCore AI Assistant
+                            </h2>
+                            <p class="text-xs text-slate-400">Powered by Groq GPT-OSS 120B</p>
+                        </div>
+                        <span id="ai-status-badge" class="px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-[10px] font-semibold rounded-lg">Online</span>
+                    </div>
+
+                    <div id="chat-messages" class="flex-1 overflow-y-auto space-y-4 pr-2 text-xs">
+                        <div class="flex gap-3">
+                            <div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-white shrink-0 font-bold">AI</div>
+                            <div class="bg-slate-950 border border-slate-800 p-3.5 rounded-2xl text-slate-200 max-w-[80%] leading-relaxed">
+                                Hello! I'm your TransitCore AI assistant. Ask me anything about shuttle routes, peak traffic hours, fares, or campus navigation!
+                            </div>
+                        </div>
+                    </div>
+
+                    <form onsubmit="handleAIChat(event)" class="mt-4 pt-4 border-t border-slate-800 flex gap-3">
+                        <input type="text" id="ai-input" required placeholder="Ask about routes, timings, or schedules..." class="flex-1 p-3 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500">
+                        <button type="submit" class="px-5 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs rounded-xl transition-all shadow-lg shadow-indigo-600/20">Send</button>
+                    </form>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script>
+        const SUPABASE_URL = "";
+        const SUPABASE_KEY = "";
+        
+        let supabaseClient = null;
+        if (SUPABASE_URL && SUPABASE_KEY && !SUPABASE_URL.includes("YOUR_")) {
+            try {
+                supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+            } catch (err) {}
+        } else {
+            document.getElementById('config-warning').classList.remove('hidden');
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            if (supabaseClient) {
+                try {
+                    const { data: { session } } = await supabaseClient.auth.getSession();
+                    if (session) activateDashboard(session.user.email);
+                } catch (e) {}
+            }
+            populateMapDropdown();
+            updateWalletUI();
+            initCampusCanvas();
+        });
+
+        function switchAuthTab(tab) {
+            const loginForm = document.getElementById('login-form');
+            const regForm = document.getElementById('register-form');
+            const tabLogin = document.getElementById('tab-login');
+            const tabReg = document.getElementById('tab-register');
+            document.getElementById('auth-message').classList.add('hidden');
+
+            if (tab === 'login') {
+                loginForm.classList.remove('hidden');
+                regForm.classList.add('hidden');
+                tabLogin.className = "flex-1 py-2 text-xs font-semibold rounded-lg transition-all bg-indigo-600 text-white shadow";
+                tabReg.className = "flex-1 py-2 text-xs font-semibold rounded-lg transition-all text-slate-400 hover:text-white";
+            } else {
+                loginForm.classList.add('hidden');
+                regForm.classList.remove('hidden');
+                tabReg.className = "flex-1 py-2 text-xs font-semibold rounded-lg transition-all bg-emerald-600 text-white shadow";
+                tabLogin.className = "flex-1 py-2 text-xs font-semibold rounded-lg transition-all text-slate-400 hover:text-white";
+            }
+        }
+
+        function showMessage(text, isError = false) {
+            const box = document.getElementById('auth-message');
+            box.innerText = text;
+            box.className = `text-xs p-3 rounded-xl border ${isError ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'}`;
+            box.classList.remove('hidden');
+        }
+
+        async function handleRegister(e) {
+            e.preventDefault();
+            const email = document.getElementById('reg-email').value;
+            const password = document.getElementById('reg-password').value;
+            if (!supabaseClient) {
+                showMessage("Simulated Registration: Account created! Switch to Sign In.");
+                setTimeout(() => switchAuthTab('login'), 2000);
+                return;
+            }
+            try {
+                const { error } = await supabaseClient.auth.signUp({ email, password });
+                if (error) showMessage(error.message, true);
+                else {
+                    showMessage("Registration successful! Sign in now.");
+                    setTimeout(() => switchAuthTab('login'), 2000);
+                }
+            } catch (err) { showMessage("Network error during registration.", true); }
+        }
+
+        async function handleLogin(e) {
+            e.preventDefault();
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+            if (!supabaseClient) {
+                activateDashboard(email);
+                return;
+            }
+            try {
+                const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+                if (error) showMessage(error.message, true);
+                else activateDashboard(data.user.email);
+            } catch (err) { showMessage("Network error during sign in.", true); }
+        }
+
+        async function handleLogout() {
+            if (supabaseClient) { try { await supabaseClient.auth.signOut(); } catch (e) {} }
+            document.getElementById('dashboard-container').classList.add('hidden');
+            document.getElementById('auth-container').classList.remove('hidden');
+        }
+
+        function activateDashboard(email) {
+            document.getElementById('auth-container').classList.add('hidden');
+            document.getElementById('dashboard-container').classList.remove('hidden');
+            document.getElementById('user-display').innerText = email;
+            loadShuttles();
+            renderUserTrips();
+            updateWalletUI();
+        }
+
+        function switchTab(tabName) {
+            const tabs = ['home', 'timings', 'map', 'events', 'forecast', 'payment', 'due', 'ai'];
+            tabs.forEach(t => {
+                const content = document.getElementById(`tab-content-${t}`);
+                const navBtn = document.getElementById(`nav-${t}`);
+                if (t === tabName) {
+                    content.classList.remove('hidden');
+                    navBtn.className = "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/20";
+                } else {
+                    content.classList.add('hidden');
+                    navBtn.className = "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-800/60 transition-all";
+                }
+            });
+            if (tabName === 'due') {
+                renderDueSection();
+            }
+            if (tabName === 'payment') {
+                updateWalletUI();
+            }
+        }
+
+        async function handleAIChat(e) {
+            e.preventDefault();
+            const inputField = document.getElementById('ai-input');
+            const prompt = inputField.value.trim();
+            if (!prompt) return;
+
+            const chatMessages = document.getElementById('chat-messages');
+            chatMessages.innerHTML += `<div class="flex gap-3 justify-end"><div class="bg-indigo-600 text-white p-3.5 rounded-2xl max-w-[80%] leading-relaxed">${prompt}</div></div>`;
+            inputField.value = '';
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            const loadingId = 'loading-' + Date.now();
+            chatMessages.innerHTML += `<div id="${loadingId}" class="flex gap-3"><div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-white shrink-0 font-bold">AI</div><div class="bg-slate-950 border border-slate-800 p-3.5 rounded-2xl text-slate-400 italic">Thinking with Groq GPT-OSS...</div></div>`;
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            try {
+                const response = await fetch('/api/ai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt })
+                });
+                const data = await response.json();
+                document.getElementById(loadingId).remove();
+                chatMessages.innerHTML += `<div class="flex gap-3"><div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-white shrink-0 font-bold">AI</div><div class="bg-slate-950 border border-slate-800 p-3.5 rounded-2xl text-slate-200 max-w-[80%] leading-relaxed">${data.reply}</div></div>`;
+            } catch (err) {
+                document.getElementById(loadingId).remove();
+                chatMessages.innerHTML += `<div class="flex gap-3"><div class="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center text-white shrink-0 font-bold">AI</div><div class="bg-rose-500/10 border border-rose-500/20 text-rose-400 p-3.5 rounded-2xl max-w-[80%]">Error communicating with AI service.</div></div>`;
+            }
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        const sampleShuttles = [
+            { id: 'SH-01', name: 'Shuttle 01 (Campus Express)', from: 'Hostel Block 18', to: 'Tech Tower (TT)', seats: 12, cost: '₹10.00', status: 'On Schedule' },
+            { id: 'SH-02', name: 'Shuttle 02 (Library Loop)', from: 'Silver Jubilee Tower', to: 'Central Library', seats: 4, cost: '₹10.00', status: 'Moderate Rush' },
+            { id: 'SH-03', name: 'Shuttle 03 (Sports Complex)', from: 'Main Gate', to: 'Indoor Stadium', seats: 19, cost: '₹10.00', status: 'On Schedule' },
+            { id: 'SH-04', name: 'Shuttle 04 (Mess Special)', from: 'MH Dining Hall', to: 'Academic Block 3', seats: 8, cost: '₹10.00', status: 'Departing Soon' }
+        ];
+
+        let selectedShuttle = null;
+        let activeMapShuttleId = 'SH-01';
+
+        // Wallet Balance & State
+        let walletBalance = 25.00;
+
+        // User bus trip log storage
+        let userTrips = [
+            { id: 'SH-01', name: 'Shuttle 01 (Campus Express)', route: 'Hostel Block 18 ➔ Tech Tower (TT)', time: 'Today, 08:30 AM', fare: 10.00, paid: false },
+            { id: 'SH-02', name: 'Shuttle 02 (Library Loop)', route: 'Silver Jubilee Tower ➔ Central Library', time: 'Yesterday, 02:15 PM', fare: 10.00, paid: true }
+        ];
+
+        // --- CAMPUS CANVAS MAP LOGIC ---
+        let shuttleProgress = 0.0;
+        const checkpoints = [
+            { name: "Hostel Block 18", x: 120, y: 320 },
+            { name: "Main Gate", x: 300, y: 380 },
+            { name: "Tech Tower (TT)", x: 450, y: 220 },
+            { name: "Central Library", x: 600, y: 150 },
+            { name: "Indoor Stadium", x: 680, y: 320 }
+        ];
+
+        const staticRoads = [
+            { from: {x: 80, y: 320}, to: {x: 300, y: 380} },
+            { from: {x: 300, y: 380}, to: {x: 450, y: 220} },
+            { from: {x: 450, y: 220}, to: {x: 600, y: 150} },
+            { from: {x: 600, y: 150}, to: {x: 720, y: 320} },
+            { from: {x: 300, y: 380}, to: {x: 680, y: 320} }, // Cross road
+            { from: {x: 450, y: 220}, to: {x: 120, y: 150} }
+        ];
+
+        function initCampusCanvas() {
+            const canvas = document.getElementById('campusMapCanvas');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+
+            // Animation loop for moving shuttle
+            setInterval(() => {
+                shuttleProgress += 0.005;
+                if (shuttleProgress > 1.0) shuttleProgress = 0.0;
+                drawCanvasMap(ctx, canvas.width, canvas.height);
+            }, 30);
+        }
+
+        function drawCanvasMap(ctx, width, height) {
+            ctx.clearRect(0, 0, width, height);
+
+            // 1. Draw static background grid & styling
+            ctx.fillStyle = '#020617'; // slate-950
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw grid dots
+            ctx.fillStyle = '#1e293b';
+            for (let x = 40; x < width; x += 40) {
+                for (let y = 40; y < height; y += 40) {
+                    ctx.fillRect(x, y, 2, 2);
+                }
+            }
+
+            // 2. Draw static roads
+            ctx.strokeStyle = '#334155'; // slate-700
+            ctx.lineWidth = 6;
+            ctx.lineCap = 'round';
+            staticRoads.forEach(road => {
+                ctx.beginPath();
+                ctx.moveTo(road.from.x, road.from.y);
+                ctx.lineTo(road.to.x, road.to.y);
+                ctx.stroke();
+            });
+
+            // Highlight selected active route road path
+            ctx.strokeStyle = '#6366f1'; // indigo-500
+            ctx.lineWidth = 3;
+            ctx.setLineDash([6, 6]);
+            ctx.beginPath();
+            ctx.moveTo(checkpoints[0].x, checkpoints[0].y);
+            for (let i = 1; i < checkpoints.length; i++) {
+                ctx.lineTo(checkpoints[i].x, checkpoints[i].y);
+            }
+            ctx.stroke();
+            ctx.setLineDash([]); // Reset line dash
+
+            // 3. Draw Checkpoint Markers
+            checkpoints.forEach((cp, idx) => {
+                // Outer glow pulse
+                ctx.fillStyle = 'rgba(245, 158, 11, 0.2)';
+                ctx.beginPath();
+                ctx.arc(cp.x, cp.y, 14, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Marker dot
+                ctx.fillStyle = '#f59e0b'; // amber-500
+                ctx.beginPath();
+                ctx.arc(cp.x, cp.y, 6, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Checkpoint label
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '10px "Plus Jakarta Sans", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(cp.name, cp.x, cp.y - 16);
+            });
+
+            // 4. Calculate Moving Shuttle Position along Checkpoints Path
+            const totalSegments = checkpoints.length - 1;
+            const scaledProgress = shuttleProgress * totalSegments;
+            const currentSegment = Math.floor(scaledProgress);
+            const segmentProgress = scaledProgress - currentSegment;
+
+            if (currentSegment < totalSegments) {
+                const p1 = checkpoints[currentSegment];
+                const p2 = checkpoints[currentSegment + 1];
+
+                const currentX = p1.x + (p2.x - p1.x) * segmentProgress;
+                const currentY = p1.y + (p2.y - p1.y) * segmentProgress;
+
+                // Draw Shuttle Pin / Vehicle
+                ctx.shadowColor = '#6366f1';
+                ctx.shadowBlur = 12;
+                ctx.fillStyle = '#6366f1'; // indigo-600
+                ctx.beginPath();
+                ctx.arc(currentX, currentY, 10, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0; // Reset shadow
+
+                // Inner white icon dot
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(currentX, currentY, 4, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Shuttle Label badge above vehicle
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 10px "Plus Jakarta Sans", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(`${activeMapShuttleId} (En Route)`, currentX, currentY - 16);
+            }
+        }
+
+        function updateWalletUI() {
+            const balanceEl = document.getElementById('payment-wallet-balance');
+            const alertEl = document.getElementById('payment-low-balance-alert');
+            const dueAlertEl = document.getElementById('due-low-balance-alert');
+
+            if (balanceEl) {
+                balanceEl.innerText = `₹${walletBalance.toFixed(2)}`;
+            }
+
+            if (walletBalance < 30) {
+                if (alertEl) alertEl.classList.remove('hidden');
+                if (dueAlertEl) dueAlertEl.classList.remove('hidden');
+            } else {
+                if (alertEl) alertEl.classList.add('hidden');
+                if (dueAlertEl) dueAlertEl.classList.add('hidden');
+            }
+        }
+
+        function toggleTopUpDropdown() {
+            const dropdown = document.getElementById('topup-dropdown');
+            if (dropdown) {
+                dropdown.classList.toggle('hidden');
+            }
+        }
+
+        function confirmTopUp() {
+            const selectEl = document.getElementById('topup-select-amount');
+            if (selectEl) {
+                const addedValue = parseFloat(selectEl.value);
+                walletBalance += addedValue;
+                updateWalletUI();
+                toggleTopUpDropdown();
+                alert(`Successfully topped up ₹${addedValue.toFixed(2)}! New wallet balance is ₹${walletBalance.toFixed(2)}.`);
+            }
+        }
+
+        function loadShuttles() {
+            const listContainer = document.getElementById('shuttle-list');
+            listContainer.innerHTML = '';
+            sampleShuttles.forEach(shuttle => {
+                const item = document.createElement('div');
+                item.className = "p-3 bg-slate-900 hover:bg-slate-800/80 border border-slate-800 rounded-xl cursor-pointer transition-all flex items-center justify-between";
+                item.innerHTML = `<div><div class="flex items-center gap-2"><span class="font-mono text-[10px] text-indigo-400 font-bold">${shuttle.id}</span><h4 class="text-xs font-bold text-white">${shuttle.name}</h4></div><p class="text-[11px] text-slate-400 mt-0.5">${shuttle.from} ➔ ${shuttle.to}</p></div><span class="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded font-medium">${shuttle.seats} seats</span>`;
+                item.onclick = () => selectShuttle(shuttle);
+                listContainer.appendChild(item);
+            });
+            if (sampleShuttles.length > 0) selectShuttle(sampleShuttles[0]);
+        }
+
+        function populateMapDropdown() {
+            const selectEl = document.getElementById('map-shuttle-select');
+            if (!selectEl) return;
+            selectEl.innerHTML = '';
+            sampleShuttles.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.id;
+                opt.innerText = `${s.id} - ${s.name}`;
+                selectEl.appendChild(opt);
+            });
+        }
+
+        function changeMapShuttle(shuttleId) {
+            activeMapShuttleId = shuttleId;
+            shuttleProgress = 0.0; // Reset animation progress on switch
+        }
+
+        function selectShuttle(shuttle) {
+            selectedShuttle = shuttle;
+            document.getElementById('shuttle-detail-placeholder').classList.add('hidden');
+            document.getElementById('shuttle-detail-card').classList.remove('hidden');
+            document.getElementById('detail-number').innerText = shuttle.id;
+            document.getElementById('detail-name').innerText = shuttle.name;
+            document.getElementById('detail-from').innerText = shuttle.from;
+            document.getElementById('detail-to').innerText = shuttle.to;
+            document.getElementById('detail-seats').innerText = `${shuttle.seats} Seats Available`;
+            document.getElementById('detail-cost').innerText = shuttle.cost;
+            document.getElementById('detail-status').innerText = shuttle.status;
+        }
+
+        function bookShuttleSeat() {
+            if (!selectedShuttle) return;
+            if (selectedShuttle.seats > 0) {
+                selectedShuttle.seats -= 1;
+                selectShuttle(selectedShuttle);
+                loadShuttles();
+
+                const now = new Date();
+                const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' (Today)';
+                userTrips.unshift({
+                    id: selectedShuttle.id,
+                    name: selectedShuttle.name,
+                    route: `${selectedShuttle.from} ➔ ${selectedShuttle.to}`,
+                    time: timeString,
+                    fare: 10.00,
+                    paid: false
+                });
+
+                renderUserTrips();
+                alert(`Successfully chose ${selectedShuttle.id} (${selectedShuttle.name})! Trip logged to your home schedule and pending dues.`);
+            } else {
+                alert("Sorry, this shuttle is currently fully booked.");
+            }
+        }
+
+        function renderUserTrips() {
+            const tbody = document.getElementById('trip-history-tbody');
+            const countBadge = document.getElementById('trip-count-badge');
+            tbody.innerHTML = '';
+            countBadge.innerText = `${userTrips.length} Trips Logged`;
+
+            if (userTrips.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="p-6 text-center text-slate-500 italic">No shuttle trips taken yet. Select and choose a shuttle above to log a trip.</td></tr>`;
+                return;
+            }
+
+            userTrips.forEach((trip, index) => {
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-slate-900/50 transition-all";
+                tr.innerHTML = `
+                    <td class="p-3 font-mono font-bold text-indigo-400">${trip.id}</td>
+                    <td class="p-3">
+                        <div class="font-medium text-white">${trip.name}</div>
+                        <div class="text-[11px] text-slate-400">${trip.route}</div>
+                    </td>
+                    <td class="p-3 font-mono text-slate-300">${trip.time}</td>
+                    <td class="p-3 font-mono font-semibold text-white">₹${trip.fare.toFixed(2)}</td>
+                    <td class="p-3 text-right">
+                        ${trip.paid ? '<span class="px-2.5 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-semibold rounded-lg">Paid</span>' : '<span class="px-2.5 py-1 bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] font-semibold rounded-lg">Pending Due</span>'}
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function renderDueSection() {
+            const container = document.getElementById('due-container');
+            const totalBadge = document.getElementById('due-total-badge');
+            container.innerHTML = '';
+
+            const unpaidTrips = userTrips.filter(t => !t.paid);
+            const totalDue = unpaidTrips.reduce((sum, t) => sum + t.fare, 0);
+
+            totalBadge.innerText = `Total Due: ₹${totalDue.toFixed(2)}`;
+            updateWalletUI();
+
+            if (unpaidTrips.length === 0) {
+                container.innerHTML = `
+                    <div class="p-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs rounded-xl font-medium">
+                        ✨ No pending dues or unpaid fares registered on your student account.
+                    </div>
+                `;
+                return;
+            }
+
+            unpaidTrips.forEach((trip, index) => {
+                const div = document.createElement('div');
+                div.className = "p-4 bg-slate-950 border border-slate-800 rounded-xl flex items-center justify-between";
+                div.innerHTML = `
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-mono text-[10px] text-amber-400 font-bold">${trip.id}</span>
+                            <h4 class="text-xs font-bold text-white">Unpaid Bus Fare - ${trip.name}</h4>
+                        </div>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Route: ${trip.route} | Taken at: ${trip.time}</p>
+                    </div>
+                    <div class="flex items-center gap-4">
+                        <span class="text-sm font-mono font-bold text-amber-400">₹${trip.fare.toFixed(2)}</span>
+                        <button onclick="payDueTrip('${trip.time}')" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-xl shadow transition-all">Clear Due</button>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        function payDueTrip(tripTime) {
+            const trip = userTrips.find(t => t.time === tripTime);
+            if (!trip) return;
+
+            if (walletBalance < trip.fare) {
+                alert("⚠️ Balance insufficient! Please top up your wallet before clearing this due.");
+                switchTab('payment');
+                return;
+            }
+
+            walletBalance -= trip.fare;
+            trip.paid = true;
+
+            renderUserTrips();
+            renderDueSection();
+            updateWalletUI();
+
+            if (walletBalance < 30) {
+                alert(`Successfully cleared due! Note: Your wallet balance (₹${walletBalance.toFixed(2)}) is now below ₹30. Balance insufficient warning triggered.`);
+            } else {
+                alert(`Successfully cleared due of ₹${trip.fare.toFixed(2)} for ${trip.name} from your wallet!`);
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+class AppHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/" or self.path == "":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(HTML_TEMPLATE.encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"404 Not Found")
+
+    def do_POST(self):
+        if self.path == "/api/ai":
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            
+            try:
+                req_data = json.loads(body.decode('utf-8'))
+                user_prompt = req_data.get('prompt', '')
+
+                reply = ""
+                if groq_client:
+                    try:
+                        completion = groq_client.chat.completions.create(
+                            model="openai/gpt-oss-120b",
+                            messages=[
+                                {"role": "system", "content": "You are TransitCore AI, a helpful campus transit assistant. Give concise, friendly advice regarding shuttles, routes, timings, and campus navigation."},
+                                {"role": "user", "content": user_prompt}
+                            ]
+                        )
+                        reply = completion.choices[0].message.content
+                    except Exception as api_err:
+                        reply = f"Groq API error: {api_err}"
+                else:
+                    p_lower = user_prompt.lower()
+                    if "time" in p_lower or "schedule" in p_lower:
+                        reply = "Shuttles run every 10-15 minutes from Hostel Block 18 to Tech Tower (TT) between 07:30 AM and 09:30 PM."
+                    elif "cost" in p_lower or "price" in p_lower:
+                        reply = "Standard shuttle trips cost ₹10.00, payable via your transit wallet or pass."
+                    else:
+                        reply = f"I've received your query: '{user_prompt}'. (Note: Set your GROQ_API_KEY environment variable to enable live GPT-OSS responses)."
+
+                response_body = json.dumps({"reply": reply}).encode('utf-8')
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(response_body)
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"reply": f"Server error: {str(e)}"}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+if __name__ == "__main__":
+    server_address = ("127.0.0.1", PORT)
+    httpd = http.server.HTTPServer(server_address, AppHandler)
+    print(f"\n[🚀] TransitCore Dashboard running at: http://127.0.0.1:{PORT}\n")
+    httpd.serve_forever()
