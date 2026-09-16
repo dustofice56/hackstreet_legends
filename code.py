@@ -7,7 +7,7 @@ PORT = 8000
 # --- Configuration ---
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "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")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 supabase_client = None
 try:
